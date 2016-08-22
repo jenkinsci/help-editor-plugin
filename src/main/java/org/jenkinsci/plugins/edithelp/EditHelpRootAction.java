@@ -1,84 +1,69 @@
 package org.jenkinsci.plugins.edithelp;
 
-import java.io.*;
-
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.BufferedWriter;
+import java.io.OutputStreamWriter;
+import java.io.FileOutputStream;
 import hudson.Extension;
-import hudson.model.Action;
+import hudson.cli.PrivateKeyProvider;
 import hudson.model.RootAction;
-import hudson.model.View;
 import jenkins.model.Jenkins;
-import org.apache.tools.ant.taskdefs.Recorder;
-import org.kohsuke.stapler.Stapler;
-import org.kohsuke.stapler.StaplerRequest;
-import org.kohsuke.stapler.lang.Klass;
-import sun.misc.URLClassPath;
-
-import javax.swing.*;
-import java.net.Socket;
-import java.net.URL;
-import java.util.ArrayList;
+import org.apache.commons.lang.StringUtils;
+import org.kohsuke.accmod.Restricted;
+import org.kohsuke.accmod.restrictions.NoExternalUse;
+import org.kohsuke.stapler.HttpResponse;
+import org.kohsuke.stapler.QueryParameter;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
+import java.util.logging.Logger;
+import hudson.util.HttpResponses;
+
+import static java.nio.file.Files.readAllLines;
+import static java.util.logging.Level.WARNING;
+
+
+
 
 
 @Extension
 public class EditHelpRootAction implements RootAction {
 
-    //reading the catalog of helpmanager
-    private static ArrayList<File> listWithFileNames = new ArrayList<>();
-    public static void getListFiles(String str) {
-        File f = new File(str);
-        File[] mydr = f.listFiles();
-        if (mydr == null)
-            return;
-        for (File s : mydr) {
-            if (s.isFile()) {
-                listWithFileNames.add(s);
-            } else if (s.isDirectory()) {
-                getListFiles(s.getAbsolutePath());
-            }
-        }
-    }
+    private static final Logger LOGGER = Logger.getLogger(PrivateKeyProvider.class.getName());
 
-    //array for cache storage
-    Map<String, String> map = new TreeMap<String, String>();
+    //hashMap for cache storage
+    private transient Map<String, String> hashMapOfHelp = new HashMap<String, String>();
 
     //reading files into cache
     public EditHelpRootAction() throws IOException, FileNotFoundException {
-        Jenkins jn = Jenkins.getInstance();
-        if (jn != null) {
-            File dirfile = jn.getRootDir();         
-            String dirName = null;         
-            if(dirfile != null) {
-                dirName = dirfile.toString()+"/helpmanager";
+        File dirfile = Jenkins.getActiveInstance().getRootDir();
+        if(dirfile != null) {
+
             //check if the directory exists
-                File helpManagerFile = new File(dirName);
+            File helpManagerFile = new File(dirfile, "helpmanager");
 
-                if(!helpManagerFile.exists())
-                    if (!helpManagerFile.mkdirs()) {
-                        System.out.print("unable create directory");
-                    }
-
-                //reading files from the directory
-                getListFiles(dirName);
-
-                //stream reading from files
-                for (File fil : listWithFileNames) {
-                    StringBuilder sb = new StringBuilder();
-                    BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(fil), "UTF8"));
-                    try {
-                        String s;
-                        while ((s = br.readLine()) != null) {
-                            sb.append(s);
-                            sb.append("\n");
-                        }
-                    } finally {
-                        br.close();
-                    }
-                    map.put(fil.getName(),sb.toString());
+            if (!helpManagerFile.exists()) {
+                if (!helpManagerFile.mkdirs()) {
+                    LOGGER.log(WARNING,"Unable create directory: "+helpManagerFile.getAbsolutePath());
                 }
-            }            
-        }            
+            }
+
+            //reading files from the directory
+            if (helpManagerFile.getAbsolutePath() != null) {
+                File dir = new File(helpManagerFile.getAbsolutePath());
+                File[] files = dir.listFiles();
+                if (files != null) {
+                    for (File file : files){
+                        if (file.isFile()){
+                            hashMapOfHelp.put(file.getName(),readFromFile(file));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     @Override
@@ -96,60 +81,76 @@ public class EditHelpRootAction implements RootAction {
         return "helpmanager";
     }
 
-    //copying from array
-    public String getMyString() {
-        //process get request
-        String class_name = Stapler.getCurrentRequest().getParameter("class");
+    //copying from HashMap
+    @Restricted(NoExternalUse.class)
+    public HttpResponse doHelpInfo(@QueryParameter("class") String className) {
 
-        if(map.containsKey(class_name+".html")){
-            return map.get(class_name+".html");
-        }else{
-            return null;
+        Jenkins.getActiveInstance().checkPermission(Jenkins.READ);
+
+        String Help = hashMapOfHelp.get(className+".html");
+        
+        if (Help != null) {
+            return HttpResponses.html(Help);
+        }
+        else {
+            return HttpResponses.html("");
+        }
+
+        
+    }
+
+    private void writeInFile(File file, String info) {
+        try (BufferedWriter out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), StandardCharsets.UTF_8))){
+            out.write(info);
+            out.flush();
+        } catch (IOException exname){
+            LOGGER.log(WARNING,"file was not written:"+file.getAbsolutePath());
+        }
+    }
+
+    private String readFromFile(File file) throws IOException {
+        try {
+            List<String> getStringList = readAllLines(file.toPath(),StandardCharsets.UTF_8);
+            return StringUtils.join(getStringList, "\n");
+        } catch (IOException exname) {
+            LOGGER.log(WARNING,"help file was not read:"+file.getAbsolutePath());
+            return "";
         }
     }
 
     //save text area into file and array
-    public String getUpdateMyString() throws IOException, FileNotFoundException {
+    @Restricted(NoExternalUse.class)
+    public void doUpdateHelpInfo(@QueryParameter("class") String className, @QueryParameter("textArea") String updatedClassText) {
+        Jenkins.getActiveInstance().checkPermission(Jenkins.ADMINISTER);
         //process get request
-        String class_name = Stapler.getCurrentRequest().getParameter("class");
-        String updated_class_name = Stapler.getCurrentRequest().getParameter("textArea");
+        if (className != null) {
+            //replacement or creation of the string
+            hashMapOfHelp.put(className+".html",updatedClassText);
 
-        //replacement or creation of the string
-        map.put(class_name+".html",updated_class_name);
-
-        //writing into a file
-        if (class_name != null) {
-            Jenkins jn = Jenkins.getInstance();
-            if (jn != null) {
-                File dirfile = jn.getRootDir();         
-                String dirName = null;         
-                if(dirfile != null) {
-                    dirName = dirfile.toString()+"/helpmanager";
-                    
-                    //check if the directory exists
-                    File helpManagerFile = new File(dirName);
-                    if(!helpManagerFile.exists())
-                        if (!helpManagerFile.mkdirs()) {
-                            System.out.print("unable create directory");
-                        }
-
-                    File newFile = new File(dirName + "/" + class_name + ".html");
-                    //check if the file exists
-                    if (!newFile.exists()) {
-                        if (!newFile.createNewFile()) {
-                            System.out.print("unable create directory");
-                        }
+            //writing into a file
+            File dirfile = Jenkins.getActiveInstance().getRootDir();
+            if(dirfile != null) {
+                //check if the directory exists
+                File helpManagerFile = new File(dirfile, "helpmanager");
+                if(!helpManagerFile.exists()) {
+                    if (!helpManagerFile.mkdirs()) {
+                        LOGGER.log(WARNING,"unable create helpmanager directory");
                     }
-
-                    //stream writing into file
-                    BufferedWriter out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(newFile), "UTF-8"));
-                    out.write(updated_class_name);
-                    out.flush();
-                    out.close();
-
                 }
+
+                File newFile = new File(helpManagerFile.getAbsolutePath() + "/" + className + ".html");
+                //check if the file exists
+                if (!newFile.exists()) {
+                    try {
+                        if (!newFile.createNewFile()) {
+                            LOGGER.log(WARNING,"help file was not created:"+newFile.getAbsolutePath());
+                        }
+                    } catch (IOException exname) {
+                        LOGGER.log(WARNING,"help file was not created:"+newFile.getAbsolutePath());
+                    }
+                }
+                writeInFile(newFile, updatedClassText);
             }
-        }
-        return null;
+        } 
     }
 }
